@@ -1,0 +1,38 @@
+# Met à jour catalogues/bonial.json (catalogues et offres des enseignes)
+# pour la version web de Panier Économique, toutes les 6 heures.
+name: Catalogues des enseignes
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: catalogues
+  cancel-in-progress: false
+
+jobs:
+  catalogues:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Lire Bonial
+        run: python .github/scripts/catalogues_bonial.py
+      - name: Enregistrer
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add catalogues/bonial.json
+          if git diff --cached --quiet; then
+            echo 'Pas de changement.'
+            exit 0
+          fi
+          git commit -m 'Catalogues des enseignes (mise à jour automatique)'
+          git pull --rebase
+          git push
