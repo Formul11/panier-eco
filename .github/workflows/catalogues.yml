@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Lire Bonial
+      - name: Lire Bonial, kaufDA et Tiendeo
         run: python .github/scripts/catalogues_bonial.py
       - name: Enregistrer
         run: |
