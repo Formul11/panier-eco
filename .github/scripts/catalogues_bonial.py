@@ -269,6 +269,131 @@ def ecrire_pages(sources):
     print(f'Pages de catalogues : {len(gardes)} ({erreurs} erreur(s))')
 
 
+# Tiendeo : pages et zones des produits, lues sur le service public de la
+# visionneuse (publication_pages ; accord de l'utilisateur, 2026-11-26).
+# Le nom et le prix ne sont publics que pour 50 produits par catalogue
+# (page du catalogue) ; les autres zones restent touchables, l'appli
+# montre alors le produit agrandi pour le saisir. Les fiches produits
+# (viewer_api) sont protégées contre les robots : on ne les lit pas.
+# France et Allemagne seulement (magasins de l'utilisateur), pour ne pas
+# surcharger le service.
+PAYS_PAGES_TIENDEO = ('FR', 'DE')
+PUBLICATIONS = 'https://shopfully-publication-api.global.ssl.fastly.net/publication_pages'
+
+
+def image_page(descripteurs, niveau):
+    """Adresse https de l'image de page au niveau voulu (webp de préférence)."""
+    for d in descripteurs:
+        chemin = str((d.get('pageRepresentation') or {}).get('resourcePath') or '')
+        if f'_level_{niveau}_' in chemin and chemin.endswith('.webp'):
+            return 'https://' + chemin, d.get('width'), d.get('height')
+    return None, None, None
+
+
+def pages_tiendeo(url):
+    html = telecharger(url)
+    donnees = json.loads(NEXT.search(html).group(1))
+    ressources = donnees['props']['pageProps']['apiResources']
+    flyer = ressources.get('flyer') or {}
+    m = re.search(r'/publication/([a-z]{2}_[a-z]{2})_(\d+)',
+                  str(flyer.get('publication_url') or ''))
+    if not m:
+        raise LookupError('pas de publication')
+    langue, numero = m.groups()
+    connus = {}
+    for g in (ressources.get('flyerGibsData') or {}).get('flyerGibs') or []:
+        reglages = g.get('settings') or {}
+        chiffres = str((reglages.get('price_extended') or {}).get('digits') or '')
+        try:
+            prix = round(float(chiffres.replace(',', '.')), 2) if chiffres else None
+        except ValueError:
+            prix = None
+        connus[g.get('id')] = {'n': str(g.get('title') or '').strip(),
+                               'p': prix if prix and prix > 0 else None}
+    pages = {}
+    zones = {}
+    tranche = 1
+    total = None
+    while tranche < 40:
+        lot = telecharger_json(f'{PUBLICATIONS}/{langue}/{numero}/{tranche}?format=all')
+        if not isinstance(lot, dict) or not lot:
+            break
+        descripteur = lot.get('publicationDescriptor') or {}
+        total = descripteur.get('numberOfPages') or total
+        recues = {int(c): v for c, v in lot.items() if str(c).isdigit()}
+        if not recues:
+            break
+        pages.update(recues)
+        try:
+            for cle, liste in telecharger_json(
+                    f'{PUBLICATIONS}/{langue}/{numero}/enr/{tranche}').items():
+                if str(cle).isdigit() and isinstance(liste, list):
+                    zones.setdefault(int(cle), []).extend(liste)
+        except Exception:
+            pass  # tranche sans produits repérés
+        if (total and len(pages) >= total) or len(recues) < 10:
+            break
+        tranche += 1
+        time.sleep(0.5)
+    sortie = []
+    for numero_page in sorted(pages):
+        descripteurs = pages[numero_page].get('pageRepresentationDescriptors') or []
+        petite, largeur, hauteur = image_page(descripteurs, 3)
+        grande, l4, h4 = image_page(descripteurs, 4)
+        largeur, hauteur = l4 or largeur, h4 or hauteur
+        produits = []
+        for z in zones.get(numero_page, []):
+            forme = z.get('crop_shape') or {}
+            if not z.get('flyerGibType') or not forme:
+                continue
+            x, y = float(forme.get('x', 0)), float(forme.get('y', 0))
+            w, h = float(forme.get('width', 0)), float(forme.get('height', 0))
+            if w <= 0 or h <= 0:
+                continue
+            infos = connus.get(z.get('id')) or {'n': '', 'p': None}
+            produits.append({
+                'n': infos['n'], 'p': infos['p'], 'u': '', 'img': '',
+                'z': [round(max(0, x), 4), round(max(0, y), 4),
+                      round(min(1, x + w), 4), round(min(1, y + h), 4)],
+            })
+        sortie.append({
+            'img': petite or grande or '', 'grande': grande or petite or '',
+            'r': round(largeur / hauteur, 4) if largeur and hauteur else None,
+            'produits': produits,
+        })
+    titre = str(flyer.get('title') or '')
+    return {'id': str(flyer.get('id') or ''), 'titre': titre, 'pages': sortie}
+
+
+def ecrire_pages_tiendeo(tiendeo):
+    dossier = pathlib.Path('catalogues/tiendeo')
+    dossier.mkdir(parents=True, exist_ok=True)
+    gardes = set()
+    erreurs = 0
+    for pays in PAYS_PAGES_TIENDEO:
+        for enseigne in (tiendeo.get(pays) or {}).values():
+            for b in (enseigne.get('brochures') or {}).get('publisher') or []:
+                ident = str(b.get('id') or '')
+                url = str(b.get('url') or '')
+                if not ident.isdigit() or not url.startswith('https://') or ident in gardes:
+                    continue
+                gardes.add(ident)
+                try:
+                    contenu = pages_tiendeo(url)
+                except Exception as e:
+                    erreurs += 1
+                    print(f'Tiendeo pages {ident} : {e}', file=sys.stderr)
+                    continue
+                if contenu['pages']:
+                    (dossier / f'{ident}.json').write_text(json.dumps(
+                        contenu, ensure_ascii=False, separators=(',', ':')), 'utf-8')
+                time.sleep(1)
+    for fichier in dossier.glob('*.json'):
+        if fichier.stem not in gardes:
+            fichier.unlink()
+    print(f'Pages Tiendeo : {len(gardes)} ({erreurs} erreur(s))')
+
+
 def collecter(slugs, lecteur, ancien, nom):
     """Lit chaque page ; en cas d'échec, garde l'ancienne version."""
     pages = {}
@@ -322,6 +447,7 @@ def main():
           f'kaufDA {len(kaufda)} ({e2}), '
           f'Tiendeo {sum(len(v) for v in tiendeo.values())} ({e3})')
     ecrire_pages({'enseignes': enseignes, 'kaufda': kaufda})
+    ecrire_pages_tiendeo(tiendeo)
 
 
 if __name__ == '__main__':
