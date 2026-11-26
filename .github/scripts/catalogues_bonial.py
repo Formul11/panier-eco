@@ -187,19 +187,27 @@ def pages_catalogue(source, brochure):
         infos = telecharger_json(
             f'{hote}/v1/brochures/{ident}?{requete}')['content']
         rayons = []
+        bannieres = []
         for section in infos.get('sections') or []:
             time.sleep(0.5)
             donnees = telecharger_json(
                 f'{hote}/v1/brochures/{ident}/section/'
                 f'{section.get("number", 0)}?{requete}')['content']
-            produits = [
-                p for bloc in donnees.get('blocks') or []
-                for c in bloc.get('contents') or []
-                if (c.get('content') or {}).get('type') == 'offer'
-                for p in [produit(c['content'])] if p]
+            contenus = [c.get('content') or {}
+                        for bloc in donnees.get('blocks') or []
+                        for c in bloc.get('contents') or []]
+            produits = [p for c in contenus if c.get('type') == 'offer'
+                        for p in [produit(c)] if p]
+            bannieres += [c['image'] for c in contenus
+                          if c.get('type') == 'image_banner' and c.get('image')]
             if produits:
                 rayons.append({'nom': str(section.get('name') or ''),
                                'produits': produits})
+        if not rayons and bannieres:
+            # Catalogue fait seulement d'images : affichées comme des pages.
+            return {'id': ident, 'titre': brochure.get('title') or '',
+                    'pages': [{'img': b, 'grande': b, 'produits': []}
+                              for b in bannieres]}
         return {'id': ident, 'titre': brochure.get('title') or '',
                 'rayons': rayons}
     donnees = telecharger_json(
