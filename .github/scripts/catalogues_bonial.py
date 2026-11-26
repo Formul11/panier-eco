@@ -135,6 +135,132 @@ def lire_tiendeo(pays, slug):
     return {'brochures': {'publisher': brochures}}
 
 
+# Produits de chaque catalogue (nom, prix, zone sur la page), lus sur le
+# service de la visionneuse Bonial / kaufDA (accord de l'utilisateur,
+# 2026-11-26). Un navigateur ne peut pas le lire depuis une autre adresse :
+# l'appli web lit les fichiers catalogues/pages/<id>.json écrits ici.
+VISIONNEUSE = {
+    'enseignes': ('https://content-viewer-be.bonial.fr', 'bonial_web',
+                  48.8566, 2.3522),
+    'kaufda': ('https://content-viewer-be.kaufda.de', 'kaufda_web',
+               52.52, 13.405),
+}
+
+
+def telecharger_json(url):
+    requete = urllib.request.Request(
+        url,
+        headers={'User-Agent': 'Mozilla/5.0 (compatible; PanierEco/1.0)',
+                 'Accept': 'application/json'})
+    with urllib.request.urlopen(requete, timeout=30) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+def produit(contenu):
+    """Offre de la visionneuse → {n, p, u, img} (p : prix ou None)."""
+    produits = contenu.get('products') or [{}]
+    nom = str(produits[0].get('name') or '').strip()
+    prix = None
+    unite = ''
+    for deal in contenu.get('deals') or []:
+        valeur = deal.get('min')
+        if isinstance(valeur, (int, float)) and valeur > 0 and (
+                prix is None or valeur < prix):
+            prix = round(float(valeur), 2)
+            conditions = [str(c.get('other') or '')
+                          for c in deal.get('conditions') or []]
+            unite = ', '.join(x for x in conditions + [
+                str(deal.get('priceByBaseUnit') or '')] if x)
+    if not nom:
+        return None
+    image = str(contenu.get('image') or '')
+    return {'n': nom, 'p': prix, 'u': unite,
+            'img': image + ('?impolicy=SEO-offer-thumbnails' if image else '')}
+
+
+def pages_catalogue(source, brochure):
+    """Pages (image + produits et leur zone) ou rayons d'un catalogue."""
+    hote, partenaire, lat, lng = VISIONNEUSE[source]
+    ident = brochure['contentId']
+    requete = f'partner={partenaire}&lat={lat}&lng={lng}'
+    if brochure.get('type') == 'DYNAMIC':
+        infos = telecharger_json(
+            f'{hote}/v1/brochures/{ident}?{requete}')['content']
+        rayons = []
+        for section in infos.get('sections') or []:
+            time.sleep(0.5)
+            donnees = telecharger_json(
+                f'{hote}/v1/brochures/{ident}/section/'
+                f'{section.get("number", 0)}?{requete}')['content']
+            produits = [
+                p for bloc in donnees.get('blocks') or []
+                for c in bloc.get('contents') or []
+                if (c.get('content') or {}).get('type') == 'offer'
+                for p in [produit(c['content'])] if p]
+            if produits:
+                rayons.append({'nom': str(section.get('name') or ''),
+                               'produits': produits})
+        return {'id': ident, 'titre': brochure.get('title') or '',
+                'rayons': rayons}
+    donnees = telecharger_json(
+        f'{hote}/v1/brochures/{ident}/pages?{requete}')
+    pages = []
+    for page in donnees.get('contents') or []:
+        images = {i.get('size'): i.get('url') for i in page.get('images') or []}
+        produits = []
+        for offre in page.get('offers') or []:
+            contenu = offre.get('content') or {}
+            zone = (((contenu.get('parentContent') or {}).get('page') or {})
+                    .get('area') or {})
+            p = produit(contenu)
+            if not p or not zone:
+                continue
+            haut, bas = zone.get('topLeft') or {}, zone.get('bottomRight') or {}
+            p['z'] = [round(float(haut.get('x', 0)), 4),
+                      round(float(haut.get('y', 0)), 4),
+                      round(float(bas.get('x', 1)), 4),
+                      round(float(bas.get('y', 1)), 4)]
+            produits.append(p)
+        pages.append({
+            'img': images.get('768x1024') or images.get('1600x1600') or '',
+            'grande': images.get('1600x1600') or images.get('768x1024') or '',
+            'produits': produits,
+        })
+    return {'id': ident, 'titre': brochure.get('title') or '', 'pages': pages}
+
+
+def ecrire_pages(sources):
+    """Écrit catalogues/pages/<id>.json pour chaque catalogue Bonial et
+    kaufDA, et supprime ceux qui ne sont plus en cours."""
+    dossier = pathlib.Path('catalogues/pages')
+    dossier.mkdir(parents=True, exist_ok=True)
+    gardes = set()
+    erreurs = 0
+    for source, enseignes in sources.items():
+        for donnees in enseignes.values():
+            brochures = donnees.get('brochures') or {}
+            for brochure in (brochures.get('viewer') or []) + (
+                    brochures.get('publisher') or []):
+                ident = str(brochure.get('contentId') or '')
+                if not re.fullmatch(r'[0-9a-f-]{20,}', ident) or ident in gardes:
+                    continue
+                gardes.add(ident)
+                fichier = dossier / f'{ident}.json'
+                try:
+                    contenu = pages_catalogue(source, brochure)
+                except Exception as e:
+                    erreurs += 1
+                    print(f'Pages {ident} : {e}', file=sys.stderr)
+                    continue  # l'ancien fichier, s'il existe, est gardé
+                fichier.write_text(json.dumps(
+                    contenu, ensure_ascii=False, separators=(',', ':')), 'utf-8')
+                time.sleep(1)
+    for fichier in dossier.glob('*.json'):
+        if fichier.stem not in gardes:
+            fichier.unlink()
+    print(f'Pages de catalogues : {len(gardes)} ({erreurs} erreur(s))')
+
+
 def collecter(slugs, lecteur, ancien, nom):
     """Lit chaque page ; en cas d'échec, garde l'ancienne version."""
     pages = {}
@@ -187,6 +313,8 @@ def main():
     print(f'Bonial {len(enseignes)} ({e1} erreur(s)), '
           f'kaufDA {len(kaufda)} ({e2}), '
           f'Tiendeo {sum(len(v) for v in tiendeo.values())} ({e3})')
+    ecrire_pages({'enseignes': enseignes, 'kaufda': kaufda})
 
 
-main()
+if __name__ == '__main__':
+    main()
