@@ -1,11 +1,11 @@
 {
-    "name": "panier_eco",
-    "short_name": "panier_eco",
+    "name": "Panier Économique",
+    "short_name": "Panier Éco",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#F5F8F0",
+    "theme_color": "#1B5E20",
+    "description": "Comparez le prix de vos courses entre vos magasins, trajet et carburant compris.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
